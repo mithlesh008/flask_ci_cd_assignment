@@ -455,50 +455,21 @@ curl -i "http://${EC2_HOST}:${APP_PORT}/health"
 
 The assignment evidence includes a successful complete pipeline, the success email, an intentionally failed run, and the failure email.
 
-### Screenshot placement
+## Successful Run
+<img width="1934" height="612" alt="06-pipeline-ran-successfully" src="https://github.com/user-attachments/assets/5da6768d-2e9d-4bb7-a9c2-eef8e1c27e7a" />
 
-Create a `screenshots/` directory in the repository:
+## Email Received Successful Run
+<img width="1768" height="571" alt="08-Email-Received" src="https://github.com/user-attachments/assets/b3daded4-afaf-4d7e-b20e-421eb8a0be1d" />
 
-```bash
-mkdir -p screenshots
-```
+## Final App Running
+<img width="1917" height="446" alt="09-Successfully-Deployed-via-pipeline" src="https://github.com/user-attachments/assets/7abd6659-e8d6-48d5-b1a1-694b7195d18c" />
 
-Rename or copy your screenshots using these names:
+## Intentional Failure
+<img width="1917" height="923" alt="12-intentional-failure-run" src="https://github.com/user-attachments/assets/70b135cd-5761-4e17-906b-9d70296d890b" />
 
-```text
-screenshots/01-successful-pipeline.png
-screenshots/02-ecr-commit-sha.png
-screenshots/03-ec2-container-health.png
-screenshots/04-success-email.png
-screenshots/05-intentional-failure.png
-screenshots/06-failure-email.png
-```
+## Failure EMAIL
+<img width="1917" height="673" alt="11-Intentional-Failure-email" src="https://github.com/user-attachments/assets/e034d633-7a9b-4e36-a9a4-0f69ffa3f0d5" />
 
-Before committing screenshots, redact:
-
-* MongoDB usernames, passwords, and connection strings.
-* AWS access keys.
-* SSH private-key content.
-* SMTP passwords or app passwords.
-* Any other sensitive values.
-
-Add the screenshots to this README by placing these lines under the Evidence section:
-
-```markdown
-![Successful GitHub Actions pipeline](screenshots/01-successful-pipeline.png)
-
-![ECR image tagged with commit SHA](screenshots/02-ecr-commit-sha.png)
-
-![EC2 container and health check](screenshots/03-ec2-container-health.png)
-
-![Success email](screenshots/04-success-email.png)
-
-![Intentional failed pipeline](screenshots/05-intentional-failure.png)
-
-![Failure email](screenshots/06-failure-email.png)
-```
-
-If you are submitting screenshots separately through Vlearn, the screenshots do not have to be committed to GitHub. Keep the Evidence section and attach the screenshots separately. The repository should still contain this README.
 
 ## Troubleshooting
 
