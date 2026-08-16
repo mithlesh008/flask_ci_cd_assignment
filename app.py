@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, redirect, url_for
 from flask_pymongo import PyMongo
 from bson.objectid import ObjectId
 from dotenv import load_dotenv
+from flask import jsonify
 import certifi
 import os
 
@@ -21,6 +22,24 @@ mongo = PyMongo(app, tlsCAFile=certifi.where())
 def index():
     students = mongo.db.students.find()
     return render_template('index.html', students=students)
+
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        mongo.cx.admin.command("ping")
+
+        return jsonify({
+            "status": "ok",
+            "mongodb": "reachable"
+        }), 200
+
+    except Exception:
+        app.logger.exception("MongoDB health check failed")
+
+        return jsonify({
+            "status": "error",
+            "mongodb": "unreachable"
+        }), 503
 
 # Add student
 @app.route('/add', methods=['GET', 'POST'])

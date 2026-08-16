@@ -1,0 +1,298 @@
+name: Flask CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  APP_PORT: ${{ vars.APP_PORT }}
+
+jobs:
+  test:
+    name: 1. Checkout Install Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest
+        env:
+          MONGO_URI: ${{ secrets.MONGO_TEST_URI }}
+        run: |
+          pytest -q
+
+  build_and_push:
+    name: 2. Build and Push to ECR
+    needs: test
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_uri: ${{ steps.image.outputs.image_uri }}
+      image_tag: ${{ steps.image.outputs.image_tag }}
+      registry: ${{ steps.login_ecr.outputs.registry }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        id: login_ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        id: image
+        env:
+          REGISTRY: ${{ steps.login_ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          docker build \
+            --pull \
+            -t "$IMAGE_URI" \
+            .
+
+          docker push "$IMAGE_URI"
+
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: 3. Deploy and Verify on EC2
+    needs: build_and_push
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_URI: ${{ needs.build_and_push.outputs.image_uri }}
+      REGISTRY: ${{ needs.build_and_push.outputs.registry }}
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      MONGO_URI: ${{ secrets.MONGO_URI }}
+
+    steps:
+      - name: Prepare SSH key and environment file
+        run: |
+          mkdir -p "$HOME/.ssh"
+
+          cat > "$HOME/.ssh/ec2_key" <<'EOF'
+          ${{ secrets.EC2_SSH_KEY }}
+          EOF
+
+          chmod 600 "$HOME/.ssh/ec2_key"
+
+          ssh-keyscan -H "$EC2_HOST" >> "$HOME/.ssh/known_hosts"
+
+          printf 'MONGO_URI=%s\n' "$MONGO_URI" > "$RUNNER_TEMP/flask-app.env"
+
+      - name: Verify SSH connection
+        run: |
+          ssh \
+            -i "$HOME/.ssh/ec2_key" \
+            -o BatchMode=yes \
+            "$EC2_USER@$EC2_HOST" \
+            'echo SSH connection successful'
+
+      - name: Deploy container to EC2
+        run: |
+          ssh \
+            -i "$HOME/.ssh/ec2_key" \
+            "$EC2_USER@$EC2_HOST" \
+            'mkdir -p ~/flask-cicd'
+
+          scp \
+            -i "$HOME/.ssh/ec2_key" \
+            "$RUNNER_TEMP/flask-app.env" \
+            "$EC2_USER@$EC2_HOST:flask-cicd/.env"
+
+          ssh \
+            -i "$HOME/.ssh/ec2_key" \
+            "$EC2_USER@$EC2_HOST" \
+            "chmod 600 ~/flask-cicd/.env"
+
+          ssh \
+            -i "$HOME/.ssh/ec2_key" \
+            "$EC2_USER@$EC2_HOST" \
+            "AWS_REGION='$AWS_REGION' \
+             REGISTRY='$REGISTRY' \
+             IMAGE_URI='$IMAGE_URI' \
+             APP_PORT='$APP_PORT' \
+             bash -s" <<'REMOTE_SCRIPT'
+          set -Eeuo pipefail
+
+          echo "Logging in to ECR"
+          aws ecr get-login-password \
+            --region "$AWS_REGION" \
+            | docker login \
+                --username AWS \
+                --password-stdin "$REGISTRY"
+
+          echo "Pulling image: $IMAGE_URI"
+          docker pull "$IMAGE_URI"
+
+          echo "Replacing existing container"
+          docker rm -f flask-app 2>/dev/null || true
+
+          echo "Starting new container"
+          docker run -d \
+            --restart unless-stopped \
+            --name flask-app \
+            -p "${APP_PORT}:5000" \
+            --env-file "$HOME/flask-cicd/.env" \
+            "$IMAGE_URI"
+
+          echo "Waiting for health endpoint"
+
+          for attempt in $(seq 1 30); do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              "http://127.0.0.1:${APP_PORT}/health"; then
+              echo
+              echo "Health check passed"
+              exit 0
+            fi
+
+            echo "Health check attempt ${attempt}/30 failed"
+            sleep 2
+          done
+
+          echo "Health check failed"
+          docker ps -a --filter "name=flask-app"
+          docker logs --tail 100 flask-app
+          exit 1
+          REMOTE_SCRIPT
+
+  notify_success:
+    name: 4. Success Email
+    needs:
+      - test
+      - build_and_push
+      - deploy
+    if: ${{ needs.test.result == 'success' && needs.build_and_push.result == 'success' && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send success email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          secure: true
+          subject: "[CI/CD SUCCESS] Flask deployment completed"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_FROM }}
+          body: |
+            CI/CD deployment succeeded.
+
+            Branch:
+            ${{ github.ref_name }}
+
+            Commit SHA:
+            ${{ github.sha }}
+
+            Docker image tag:
+            ${{ needs.build_and_push.outputs.image_tag }}
+
+            Docker image:
+            ${{ needs.build_and_push.outputs.image_uri }}
+
+            EC2 target:
+            ${{ secrets.EC2_HOST }}
+
+            Health check:
+            PASSED
+
+            Pipeline run:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  notify_failure:
+    name: 5. Failure Email
+    needs:
+      - test
+      - build_and_push
+      - deploy
+    if: ${{ always() && (needs.test.result == 'failure' || needs.build_and_push.result == 'failure' || needs.deploy.result == 'failure') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Identify failed stage
+        id: failed_stage
+        run: |
+          if [ "${{ needs.test.result }}" = "failure" ]; then
+            echo "stage=TEST" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.build_and_push.result }}" = "failure" ]; then
+            echo "stage=BUILD_OR_ECR_PUSH" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.deploy.result }}" = "failure" ]; then
+            echo "stage=DEPLOY_OR_HEALTH_CHECK" >> "$GITHUB_OUTPUT"
+          else
+            echo "stage=UNKNOWN" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send failure email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          secure: true
+          subject: "[CI/CD FAILURE] Flask deployment failed"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_FROM }}
+          body: |
+            CI/CD deployment failed.
+
+            Failed stage:
+            ${{ steps.failed_stage.outputs.stage }}
+
+            Branch:
+            ${{ github.ref_name }}
+
+            Commit SHA:
+            ${{ github.sha }}
+
+            Test result:
+            ${{ needs.test.result }}
+
+            Build and ECR result:
+            ${{ needs.build_and_push.result }}
+
+            Deploy result:
+            ${{ needs.deploy.result }}
+
+            Investigate the pipeline logs here:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
